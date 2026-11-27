@@ -58,11 +58,31 @@ async function apiRequest(
         : headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error(
+      '서버 연결을 찾을 수 없습니다. Vercel 배포 시 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY 환경 변수를 설정하고 재배포(Redeploy)해 주세요.'
+    );
+  }
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || '요청을 처리하지 못했습니다.');
   }
   return res.json();
+}
+
+function throwIfSupabaseError(
+  error: { message: string } | null,
+  fallbackMessage: string
+) {
+  if (!error) return;
+  console.error('Supabase error:', error);
+  if (error.message.includes('relation') || error.message.includes('does not exist')) {
+    throw new Error(
+      'Supabase 테이블이 아직 생성되지 않았습니다. SQL Editor에서 schema.sql 쿼리를 먼저 실행해 주세요.'
+    );
+  }
+  throw new Error(`${fallbackMessage} (${error.message})`);
 }
 
 // ---------- Profile ----------
@@ -84,9 +104,7 @@ export async function syncCurrentUserProfile(params: {
     .eq('uid', params.uid)
     .maybeSingle();
 
-  if (selectErr) {
-    throw new Error('프로필을 불러오지 못했습니다.');
-  }
+  throwIfSupabaseError(selectErr, '프로필을 불러오지 못했습니다.');
 
   if (existing) {
     return {
@@ -130,8 +148,9 @@ export async function syncCurrentUserProfile(params: {
     .select('*')
     .single();
 
-  if (insertErr || !inserted) {
-    throw new Error('프로필 생성에 실패했습니다.');
+  throwIfSupabaseError(insertErr, '프로필 생성에 실패했습니다.');
+  if (!inserted) {
+    throw new Error('프로필 생성 결과를 확인할 수 없습니다.');
   }
 
   return {
@@ -186,9 +205,7 @@ export async function updateMyProfile(params: {
     })
     .eq('uid', params.uid);
 
-  if (error) {
-    throw new Error('프로필 저장에 실패했습니다.');
-  }
+  throwIfSupabaseError(error, '프로필 저장에 실패했습니다.');
 }
 
 // ---------- Fetch All Community Data ----------
@@ -277,6 +294,12 @@ export async function fetchAllCommunityData(params: {
     supabase.from('gallery_likes').select('photo_id, user_uid'),
   ]);
 
+  throwIfSupabaseError(usersRes.error, '사용자 목록을 불러오지 못했습니다.');
+  throwIfSupabaseError(postsRes.error, '피드 게시글을 불러오지 못했습니다.');
+  throwIfSupabaseError(noticesRes.error, '공지·숙제를 불러오지 못했습니다.');
+  throwIfSupabaseError(anonPostsRes.error, '익명 게시판을 불러오지 못했습니다.');
+  throwIfSupabaseError(galleryRes.error, '학급 갤러리를 불러오지 못했습니다.');
+
   const userList = usersRes.data || [];
   const userMap = new Map(userList.map((u) => [u.uid as string, u]));
 
@@ -297,7 +320,6 @@ export async function fetchAllCommunityData(params: {
     postCount: postCountByUid.get(u.uid) ?? 0,
   }));
 
-  // Post likes / bookmarks / comments
   const likeCountMap = new Map<number, number>();
   const likedPostSet = new Set<number>();
   for (const l of postLikesRes.data || []) {
@@ -350,7 +372,6 @@ export async function fetchAllCommunityData(params: {
     };
   });
 
-  // Notices & homework
   const hwCountMap = new Map<number, number>();
   const hwCompletedSet = new Set<number>();
   for (const h of hwCompRes.data || []) {
@@ -380,7 +401,6 @@ export async function fetchAllCommunityData(params: {
     };
   });
 
-  // Anonymous board (strictly via privacy-safe views)
   const anonLikeCountMap = new Map<number, number>();
   const anonLikedSet = new Set<number>();
   for (const l of anonLikesRes.data || []) {
@@ -416,7 +436,6 @@ export async function fetchAllCommunityData(params: {
     comments: anonCommentsMap.get(a.id) ?? [],
   }));
 
-  // Gallery
   const galleryLikeCountMap = new Map<number, number>();
   const galleryLikedSet = new Set<number>();
   for (const l of galleryLikesRes.data || []) {
@@ -474,7 +493,7 @@ export async function createPost(params: {
     location_label:
       (params.payload.locationLabel || '2학년 3반 교실').trim().slice(0, 40),
   });
-  if (error) throw new Error('게시글 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '게시글 등록에 실패했습니다.');
 }
 
 export async function deletePost(params: {
@@ -485,7 +504,7 @@ export async function deletePost(params: {
     return apiRequest(`/api/posts/${params.postId}`, 'DELETE', params.headers);
   }
   const { error } = await supabase.from('posts').delete().eq('id', params.postId);
-  if (error) throw new Error('게시글 삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '게시글 삭제에 실패했습니다.');
 }
 
 export async function togglePostLike(params: {
@@ -500,19 +519,25 @@ export async function togglePostLike(params: {
       params.headers
     );
   }
-  const { data: existing } = await supabase
+  const { data: existing, error: selErr } = await supabase
     .from('post_likes')
     .select('id')
     .eq('post_id', params.postId)
     .eq('user_uid', params.uid)
     .maybeSingle();
+  throwIfSupabaseError(selErr, '좋아요 조회에 실패했습니다.');
 
   if (existing) {
-    await supabase.from('post_likes').delete().eq('id', existing.id);
+    const { error } = await supabase
+      .from('post_likes')
+      .delete()
+      .eq('id', existing.id);
+    throwIfSupabaseError(error, '좋아요 취소에 실패했습니다.');
   } else {
-    await supabase
+    const { error } = await supabase
       .from('post_likes')
       .insert({ post_id: params.postId, user_uid: params.uid });
+    throwIfSupabaseError(error, '좋아요 등록에 실패했습니다.');
   }
 }
 
@@ -528,19 +553,25 @@ export async function togglePostBookmark(params: {
       params.headers
     );
   }
-  const { data: existing } = await supabase
+  const { data: existing, error: selErr } = await supabase
     .from('post_bookmarks')
     .select('id')
     .eq('post_id', params.postId)
     .eq('user_uid', params.uid)
     .maybeSingle();
+  throwIfSupabaseError(selErr, '북마크 조회에 실패했습니다.');
 
   if (existing) {
-    await supabase.from('post_bookmarks').delete().eq('id', existing.id);
+    const { error } = await supabase
+      .from('post_bookmarks')
+      .delete()
+      .eq('id', existing.id);
+    throwIfSupabaseError(error, '북마크 해제에 실패했습니다.');
   } else {
-    await supabase
+    const { error } = await supabase
       .from('post_bookmarks')
       .insert({ post_id: params.postId, user_uid: params.uid });
+    throwIfSupabaseError(error, '북마크 저장에 실패했습니다.');
   }
 }
 
@@ -563,7 +594,7 @@ export async function addPostComment(params: {
     author_uid: params.uid,
     content: params.content.trim().slice(0, 500),
   });
-  if (error) throw new Error('댓글 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '댓글 등록에 실패했습니다.');
 }
 
 export async function deletePostComment(params: {
@@ -581,7 +612,7 @@ export async function deletePostComment(params: {
     .from('post_comments')
     .delete()
     .eq('id', params.commentId);
-  if (error) throw new Error('댓글 삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '댓글 삭제에 실패했습니다.');
 }
 
 export async function createNotice(params: {
@@ -608,7 +639,7 @@ export async function createNotice(params: {
     due_date: (params.payload.dueDate || '').trim().slice(0, 24),
     is_pinned: Boolean(params.payload.isPinned),
   });
-  if (error) throw new Error('공지·숙제 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '공지·숙제 등록에 실패했습니다.');
 }
 
 export async function toggleHomeworkComplete(params: {
@@ -623,19 +654,25 @@ export async function toggleHomeworkComplete(params: {
       params.headers
     );
   }
-  const { data: existing } = await supabase
+  const { data: existing, error: selErr } = await supabase
     .from('homework_completions')
     .select('id')
     .eq('notice_id', params.noticeId)
     .eq('user_uid', params.uid)
     .maybeSingle();
+  throwIfSupabaseError(selErr, '숙제 상태 조회에 실패했습니다.');
 
   if (existing) {
-    await supabase.from('homework_completions').delete().eq('id', existing.id);
+    const { error } = await supabase
+      .from('homework_completions')
+      .delete()
+      .eq('id', existing.id);
+    throwIfSupabaseError(error, '숙제 체크 해제에 실패했습니다.');
   } else {
-    await supabase
+    const { error } = await supabase
       .from('homework_completions')
       .insert({ notice_id: params.noticeId, user_uid: params.uid });
+    throwIfSupabaseError(error, '숙제 완료 체크에 실패했습니다.');
   }
 }
 
@@ -654,7 +691,7 @@ export async function deleteNotice(params: {
     .from('notices')
     .delete()
     .eq('id', params.noticeId);
-  if (error) throw new Error('삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '삭제에 실패했습니다.');
 }
 
 export async function createAnonymousPost(params: {
@@ -680,7 +717,7 @@ export async function createAnonymousPost(params: {
     title: params.payload.title.trim().slice(0, 120),
     content: params.payload.content.trim().slice(0, 2000),
   });
-  if (error) throw new Error('익명 글 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '익명 글 등록에 실패했습니다.');
 }
 
 export async function deleteAnonymousPost(params: {
@@ -698,7 +735,7 @@ export async function deleteAnonymousPost(params: {
     .from('anonymous_posts')
     .delete()
     .eq('id', params.postId);
-  if (error) throw new Error('익명 글 삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '익명 글 삭제에 실패했습니다.');
 }
 
 export async function toggleAnonymousLike(params: {
@@ -713,19 +750,25 @@ export async function toggleAnonymousLike(params: {
       params.headers
     );
   }
-  const { data: existing } = await supabase
+  const { data: existing, error: selErr } = await supabase
     .from('anonymous_likes')
     .select('id')
     .eq('post_id', params.postId)
     .eq('user_uid', params.uid)
     .maybeSingle();
+  throwIfSupabaseError(selErr, '공감 상태 조회에 실패했습니다.');
 
   if (existing) {
-    await supabase.from('anonymous_likes').delete().eq('id', existing.id);
+    const { error } = await supabase
+      .from('anonymous_likes')
+      .delete()
+      .eq('id', existing.id);
+    throwIfSupabaseError(error, '공감 취소에 실패했습니다.');
   } else {
-    await supabase
+    const { error } = await supabase
       .from('anonymous_likes')
       .insert({ post_id: params.postId, user_uid: params.uid });
+    throwIfSupabaseError(error, '공감 등록에 실패했습니다.');
   }
 }
 
@@ -750,7 +793,7 @@ export async function addAnonymousComment(params: {
     anonymous_alias: alias,
     content: params.content.trim().slice(0, 500),
   });
-  if (error) throw new Error('익명 댓글 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '익명 댓글 등록에 실패했습니다.');
 }
 
 export async function deleteAnonymousComment(params: {
@@ -768,7 +811,7 @@ export async function deleteAnonymousComment(params: {
     .from('anonymous_comments')
     .delete()
     .eq('id', params.commentId);
-  if (error) throw new Error('익명 댓글 삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '익명 댓글 삭제에 실패했습니다.');
 }
 
 export async function createGalleryPhoto(params: {
@@ -799,7 +842,7 @@ export async function createGalleryPhoto(params: {
       params.payload.takenDate || new Date().toISOString().slice(0, 10)
     ).slice(0, 20),
   });
-  if (error) throw new Error('갤러리 사진 등록에 실패했습니다.');
+  throwIfSupabaseError(error, '갤러리 사진 등록에 실패했습니다.');
 }
 
 export async function toggleGalleryLike(params: {
@@ -814,19 +857,25 @@ export async function toggleGalleryLike(params: {
       params.headers
     );
   }
-  const { data: existing } = await supabase
+  const { data: existing, error: selErr } = await supabase
     .from('gallery_likes')
     .select('id')
     .eq('photo_id', params.photoId)
     .eq('user_uid', params.uid)
     .maybeSingle();
+  throwIfSupabaseError(selErr, '좋아요 조회에 실패했습니다.');
 
   if (existing) {
-    await supabase.from('gallery_likes').delete().eq('id', existing.id);
+    const { error } = await supabase
+      .from('gallery_likes')
+      .delete()
+      .eq('id', existing.id);
+    throwIfSupabaseError(error, '좋아요 취소에 실패했습니다.');
   } else {
-    await supabase
+    const { error } = await supabase
       .from('gallery_likes')
       .insert({ photo_id: params.photoId, user_uid: params.uid });
+    throwIfSupabaseError(error, '좋아요 등록에 실패했습니다.');
   }
 }
 
@@ -845,5 +894,5 @@ export async function deleteGalleryPhoto(params: {
     .from('gallery_photos')
     .delete()
     .eq('id', params.photoId);
-  if (error) throw new Error('사진 삭제에 실패했습니다.');
+  throwIfSupabaseError(error, '사진 삭제에 실패했습니다.');
 }

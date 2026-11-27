@@ -36,6 +36,7 @@ function ClassroomCommunityApp() {
     profile,
     idToken,
     loading: authLoading,
+    authError,
     openLoginModal,
     getAuthHeaders,
   } = useAuth();
@@ -66,7 +67,11 @@ function ClassroomCommunityApp() {
       setClassmates(data.classmates);
     } catch (err) {
       console.error('Data fetch failed:', err);
-      setBannerError('학급 데이터를 불러오는 중 문제가 발생했습니다.');
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : '학급 데이터를 불러오는 중 문제가 발생했습니다.'
+      );
     } finally {
       setLoadingData(false);
     }
@@ -78,10 +83,18 @@ function ClassroomCommunityApp() {
     }
   }, [authLoading, idToken, fetchAllData]);
 
-  const runAction = async (fn: (uid: string, headers: Record<string, string>) => Promise<unknown>) => {
+  const runAction = async (
+    fn: (uid: string, headers: Record<string, string>) => Promise<unknown>
+  ) => {
     setBannerError(null);
-    if (!profile?.uid) {
+    if (!isAuthenticated) {
       openLoginModal();
+      return;
+    }
+    if (!profile?.uid) {
+      setBannerError(
+        authError || '사용자 프로필을 불러오는 중입니다. 잠시 후 다시 시도해 주세요.'
+      );
       return;
     }
     try {
@@ -182,18 +195,20 @@ function ClassroomCommunityApp() {
       </header>
 
       {/* Inline Error Banner */}
-      {bannerError && (
+      {(bannerError || authError) && (
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 pt-4">
           <div className="bg-rose-50 border border-rose-200 text-rose-800 rounded-xl px-4 py-3 text-xs font-medium flex items-center justify-between gap-3">
-            <span>{bannerError}</span>
-            <button
-              type="button"
-              aria-label="알림 닫기"
-              onClick={() => setBannerError(null)}
-              className="text-rose-500 hover:text-rose-800"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <span>{bannerError || authError}</span>
+            {bannerError && (
+              <button
+                type="button"
+                aria-label="알림 닫기"
+                onClick={() => setBannerError(null)}
+                className="text-rose-500 hover:text-rose-800"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
       )}

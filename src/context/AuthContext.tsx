@@ -26,6 +26,14 @@ export interface UserProfile {
   avatarTint: string;
 }
 
+interface SessionIdentity {
+  uid: string;
+  email: string;
+  name?: string;
+  picture?: string;
+  token: string;
+}
+
 interface AuthContextValue {
   isAuthenticated: boolean;
   authProviderMode: 'supabase' | 'firebase';
@@ -50,10 +58,23 @@ interface AuthContextValue {
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
+function formatFirebaseAuthError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  if (raw.includes('popup-blocked')) {
+    return '브라우저에서 로그인 팝업이 차단되었습니다. 팝업 차단을 허용하거나 새 탭에서 열어 다시 시도해 주세요.';
+  }
+  if (raw.includes('unauthorized-domain')) {
+    return '현재 도메인에서 Google 로그인이 허용되지 않았습니다. Vercel 배포 시 VITE_SUPABASE_URL과 VITE_SUPABASE_ANON_KEY 환경 변수를 설정한 뒤 재배포해 주세요.';
+  }
+  if (raw.includes('popup-closed-by-user') || raw.includes('cancelled-popup-request')) {
+    return '로그인 팝업 창이 닫혔습니다. 다시 시도해 주세요.';
+  }
+  return raw || 'Google 로그인에 실패했습니다.';
+}
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [sessionUser, setSessionUser] = useState<SessionIdentity | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
-  const [idToken, setIdToken] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [loginModalOpen, setLoginModalOpen] = useState(false);
@@ -62,26 +83,28 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     ? 'supabase'
     : 'firebase';
 
+  const isAuthenticated = Boolean(sessionUser);
+  const idToken = sessionUser?.token ?? null;
+
   const getAuthHeaders = useCallback(async (): Promise<Record<string, string>> => {
     if (isSupabaseAuthEnabled && supabase) {
       const { data } = await supabase.auth.getSession();
       const token = data.session?.access_token;
       if (!token) return {};
-      setIdToken(token);
       return { Authorization: `Bearer ${token}` };
     }
 
     if (!auth.currentUser) return {};
     const freshToken = await auth.currentUser.getIdToken();
-    setIdToken(freshToken);
     return { Authorization: `Bearer ${freshToken}` };
   }, []);
 
+  // Listen to auth state changes without awaiting DB queries inside callback
   useEffect(() => {
     if (isSupabaseAuthEnabled && supabase) {
       let mounted = true;
 
-      const handleSupabaseSession = async (
+      const applySession = (
         session: {
           access_token?: string;
           user?: {
@@ -92,52 +115,37 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         } | null
       ) => {
         if (!mounted) return;
-        setAuthError(null);
         if (session?.access_token && session.user) {
-          setIsAuthenticated(true);
-          setIdToken(session.access_token);
-          setLoginModalOpen(false);
-          try {
-            const meta = session.user.user_metadata || {};
-            const synced = await syncCurrentUserProfile({
-              uid: session.user.id,
-              email: session.user.email || '',
-              name:
-                typeof meta.full_name === 'string'
-                  ? meta.full_name
-                  : typeof meta.name === 'string'
-                    ? meta.name
-                    : undefined,
-              picture:
-                typeof meta.avatar_url === 'string'
-                  ? meta.avatar_url
+          const meta = session.user.user_metadata || {};
+          setSessionUser({
+            uid: session.user.id,
+            email: session.user.email || '',
+            name:
+              typeof meta.full_name === 'string'
+                ? meta.full_name
+                : typeof meta.name === 'string'
+                  ? meta.name
                   : undefined,
-              headers: { Authorization: `Bearer ${session.access_token}` },
-            });
-            if (mounted) setProfile(synced);
-          } catch (err) {
-            if (mounted) {
-              setAuthError(
-                err instanceof Error ? err.message : '프로필 연동 실패'
-              );
-            }
-          }
+            picture:
+              typeof meta.avatar_url === 'string' ? meta.avatar_url : undefined,
+            token: session.access_token,
+          });
+          setLoginModalOpen(false);
         } else {
-          setIsAuthenticated(false);
-          setIdToken(null);
+          setSessionUser(null);
           setProfile(null);
         }
-        if (mounted) setLoading(false);
+        setLoading(false);
       };
 
       supabase.auth.getSession().then(({ data }) => {
-        handleSupabaseSession(data.session);
+        applySession(data.session);
       });
 
       const {
         data: { subscription },
       } = supabase.auth.onAuthStateChange((_event, session) => {
-        handleSupabaseSession(session);
+        applySession(session);
       });
 
       return () => {
@@ -147,32 +155,22 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
-      setAuthError(null);
       if (user) {
-        setIsAuthenticated(true);
-        setLoginModalOpen(false);
         try {
           const token = await user.getIdToken();
-          setIdToken(token);
-          const synced = await syncCurrentUserProfile({
+          setSessionUser({
             uid: user.uid,
             email: user.email || '',
             name: user.displayName || undefined,
             picture: user.photoURL || undefined,
-            headers: { Authorization: `Bearer ${token}` },
+            token,
           });
-          setProfile(synced);
+          setLoginModalOpen(false);
         } catch (err) {
-          console.error('Auth sync error:', err);
-          setAuthError(
-            err instanceof Error
-              ? err.message
-              : '로그인 연동 중 오류가 발생했습니다.'
-          );
+          setAuthError(formatFirebaseAuthError(err));
         }
       } else {
-        setIsAuthenticated(false);
-        setIdToken(null);
+        setSessionUser(null);
         setProfile(null);
       }
       setLoading(false);
@@ -181,34 +179,56 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => unsubscribe();
   }, []);
 
-  const refreshProfile = useCallback(async () => {
-    if (isSupabaseAuthEnabled && supabase) {
-      const { data } = await supabase.auth.getSession();
-      const session = data.session;
-      if (!session?.user) return;
-      const meta = session.user.user_metadata || {};
-      const synced = await syncCurrentUserProfile({
-        uid: session.user.id,
-        email: session.user.email || '',
-        name:
-          typeof meta.full_name === 'string' ? meta.full_name : undefined,
-        picture:
-          typeof meta.avatar_url === 'string' ? meta.avatar_url : undefined,
-        headers: { Authorization: `Bearer ${session.access_token}` },
-      });
-      setProfile(synced);
+  // Sync user profile whenever sessionUser changes
+  useEffect(() => {
+    if (!sessionUser) {
+      setProfile(null);
       return;
     }
 
-    if (!auth.currentUser) return;
-    const token = await auth.currentUser.getIdToken();
+    let cancelled = false;
+    setAuthError(null);
+
+    syncCurrentUserProfile({
+      uid: sessionUser.uid,
+      email: sessionUser.email,
+      name: sessionUser.name,
+      picture: sessionUser.picture,
+      headers: { Authorization: `Bearer ${sessionUser.token}` },
+    })
+      .then((synced) => {
+        if (!cancelled) {
+          setProfile(synced);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          console.error('Profile sync error:', err);
+          setAuthError(
+            err instanceof Error
+              ? err.message
+              : '프로필 정보를 불러오지 못했습니다.'
+          );
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionUser]);
+
+  const refreshProfile = useCallback(async () => {
+    if (!sessionUser) return;
+    const headers = await getAuthHeaders();
     const synced = await syncCurrentUserProfile({
-      uid: auth.currentUser.uid,
-      email: auth.currentUser.email || '',
-      headers: { Authorization: `Bearer ${token}` },
+      uid: sessionUser.uid,
+      email: sessionUser.email,
+      name: sessionUser.name,
+      picture: sessionUser.picture,
+      headers,
     });
     setProfile(synced);
-  }, []);
+  }, [sessionUser, getAuthHeaders]);
 
   const signInWithGoogle = useCallback(async () => {
     setAuthError(null);
@@ -217,18 +237,19 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         provider: 'google',
         options: { redirectTo: window.location.origin },
       });
-      if (error) setAuthError(error.message);
+      if (error) {
+        setAuthError(error.message);
+        throw new Error(error.message);
+      }
       return;
     }
 
     try {
       await signInWithPopup(auth, googleAuthProvider);
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'Google 로그인에 실패했습니다.';
-      if (!msg.includes('popup-closed-by-user')) {
-        setAuthError(msg);
-      }
+      const msg = formatFirebaseAuthError(err);
+      setAuthError(msg);
+      throw new Error(msg);
     }
   }, []);
 
@@ -241,6 +262,11 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         password,
       });
       if (error) {
+        if (error.message.includes('Email not confirmed')) {
+          throw new Error(
+            '이메일 인증이 필요합니다. 받은 편지함을 확인하거나 Supabase Authentication에서 Confirm email 설정을 꺼주세요.'
+          );
+        }
         throw new Error('이메일 또는 비밀번호가 올바르지 않습니다.');
       }
     },
@@ -274,19 +300,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     } else {
       await firebaseSignOut(auth);
     }
-    setIsAuthenticated(false);
+    setSessionUser(null);
     setProfile(null);
-    setIdToken(null);
   }, []);
 
   const openLoginModal = useCallback(() => {
     setAuthError(null);
-    if (!isSupabaseAuthEnabled) {
-      signInWithGoogle();
-      return;
-    }
     setLoginModalOpen(true);
-  }, [signInWithGoogle]);
+  }, []);
 
   const closeLoginModal = useCallback(() => {
     setLoginModalOpen(false);
