@@ -1,0 +1,6 @@
+{
+  "name": "우리반그램",
+  "description": "밝은 파스텔 톤의 학급 전용 인스타그램 커뮤니티 — 공지·숙제 공유, 익명 게시판, 학급 활동 갤러리",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
