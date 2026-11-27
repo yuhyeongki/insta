@@ -11,6 +11,7 @@ import {
   X,
 } from 'lucide-react';
 import { AuthProvider, useAuth } from './context/AuthContext.tsx';
+import * as classroomApi from './services/classroomApi.ts';
 import type {
   ActiveTab,
   AnonymousPost,
@@ -26,14 +27,16 @@ import { AnonymousBoardView } from './components/AnonymousBoardView.tsx';
 import { GalleryView } from './components/GalleryView.tsx';
 import { ProfileView } from './components/ProfileView.tsx';
 import { CreateModal, type ComposerMode } from './components/CreateModal.tsx';
+import { AuthModal } from './components/AuthModal.tsx';
 
 function ClassroomCommunityApp() {
   const {
-    firebaseUser,
+    isAuthenticated,
+    authProviderMode,
     profile,
     idToken,
     loading: authLoading,
-    signIn,
+    openLoginModal,
     getAuthHeaders,
   } = useAuth();
 
@@ -52,27 +55,22 @@ function ClassroomCommunityApp() {
   const fetchAllData = useCallback(async () => {
     try {
       const headers = await getAuthHeaders();
-      const [postsRes, noticesRes, anonRes, galleryRes, matesRes] =
-        await Promise.all([
-          fetch('/api/posts', { headers }),
-          fetch('/api/notices', { headers }),
-          fetch('/api/anonymous', { headers }),
-          fetch('/api/gallery', { headers }),
-          fetch('/api/classmates', { headers }),
-        ]);
-
-      if (postsRes.ok) setPosts(await postsRes.json());
-      if (noticesRes.ok) setNotices(await noticesRes.json());
-      if (anonRes.ok) setAnonPosts(await anonRes.json());
-      if (galleryRes.ok) setGallery(await galleryRes.json());
-      if (matesRes.ok) setClassmates(await matesRes.json());
+      const data = await classroomApi.fetchAllCommunityData({
+        viewerUid: profile?.uid,
+        headers,
+      });
+      setPosts(data.posts);
+      setNotices(data.notices);
+      setAnonPosts(data.anonPosts);
+      setGallery(data.gallery);
+      setClassmates(data.classmates);
     } catch (err) {
       console.error('Data fetch failed:', err);
       setBannerError('학급 데이터를 불러오는 중 문제가 발생했습니다.');
     } finally {
       setLoadingData(false);
     }
-  }, [getAuthHeaders]);
+  }, [getAuthHeaders, profile?.uid]);
 
   useEffect(() => {
     if (!authLoading) {
@@ -80,35 +78,27 @@ function ClassroomCommunityApp() {
     }
   }, [authLoading, idToken, fetchAllData]);
 
-  const apiMutate = async (
-    url: string,
-    method: 'POST' | 'DELETE',
-    body?: unknown
-  ) => {
+  const runAction = async (fn: (uid: string, headers: Record<string, string>) => Promise<unknown>) => {
     setBannerError(null);
-    const headers: Record<string, string> = {
-      ...(await getAuthHeaders()),
-    };
-    if (body !== undefined) {
-      headers['Content-Type'] = 'application/json';
+    if (!profile?.uid) {
+      openLoginModal();
+      return;
     }
-    const res = await fetch(url, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({}));
-      const msg = data.error || '요청을 처리하지 못했습니다.';
+    try {
+      const headers = await getAuthHeaders();
+      await fn(profile.uid, headers);
+      await fetchAllData();
+    } catch (err) {
+      const msg =
+        err instanceof Error ? err.message : '요청을 처리하지 못했습니다.';
       setBannerError(msg);
-      throw new Error(msg);
+      throw err;
     }
-    return res.json();
   };
 
   const openComposer = (mode: ComposerMode) => {
-    if (!firebaseUser) {
-      signIn();
+    if (!isAuthenticated) {
+      openLoginModal();
       return;
     }
     setCreateMode(mode);
@@ -116,8 +106,8 @@ function ClassroomCommunityApp() {
   };
 
   const primaryAction = () => {
-    if (!firebaseUser) {
-      signIn();
+    if (!isAuthenticated) {
+      openLoginModal();
       return;
     }
     if (activeTab === 'notices') openComposer('notice');
@@ -185,7 +175,7 @@ function ClassroomCommunityApp() {
               onClick={primaryAction}
               className="px-4 py-2 text-xs font-semibold text-white bg-[#5B5FEF] hover:bg-[#4B4FD8] rounded-xl transition-colors whitespace-nowrap shrink-0"
             >
-              {firebaseUser ? '새 글 올리기' : '로그인'}
+              {isAuthenticated ? '새 글 올리기' : '로그인'}
             </button>
           </div>
         </div>
@@ -218,30 +208,38 @@ function ClassroomCommunityApp() {
                 posts={posts}
                 classmates={classmates}
                 loading={loadingData}
-                isSignedIn={Boolean(firebaseUser)}
-                onRequireSignIn={signIn}
+                isSignedIn={isAuthenticated}
+                onRequireSignIn={openLoginModal}
                 onOpenCreate={() => openComposer('post')}
                 onToggleLike={async (postId) => {
-                  await apiMutate(`/api/posts/${postId}/like`, 'POST');
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.togglePostLike({ postId, uid, headers })
+                  );
                 }}
                 onToggleBookmark={async (postId) => {
-                  await apiMutate(`/api/posts/${postId}/bookmark`, 'POST');
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.togglePostBookmark({ postId, uid, headers })
+                  );
                 }}
                 onAddComment={async (postId, content) => {
-                  await apiMutate(`/api/posts/${postId}/comments`, 'POST', {
-                    content,
-                  });
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.addPostComment({
+                      postId,
+                      uid,
+                      content,
+                      headers,
+                    })
+                  );
                 }}
                 onDeletePost={async (postId) => {
-                  await apiMutate(`/api/posts/${postId}`, 'DELETE');
-                  await fetchAllData();
+                  await runAction((_uid, headers) =>
+                    classroomApi.deletePost({ postId, headers })
+                  );
                 }}
                 onDeleteComment={async (commentId) => {
-                  await apiMutate(`/api/comments/${commentId}`, 'DELETE');
-                  await fetchAllData();
+                  await runAction((_uid, headers) =>
+                    classroomApi.deletePostComment({ commentId, headers })
+                  );
                 }}
               />
             )}
@@ -250,19 +248,22 @@ function ClassroomCommunityApp() {
               <NoticeBoardView
                 notices={notices}
                 loading={loadingData}
-                isSignedIn={Boolean(firebaseUser)}
-                onRequireSignIn={signIn}
+                isSignedIn={isAuthenticated}
+                onRequireSignIn={openLoginModal}
                 onOpenCreateNotice={() => openComposer('notice')}
                 onToggleHomework={async (noticeId) => {
-                  await apiMutate(
-                    `/api/notices/${noticeId}/toggle-complete`,
-                    'POST'
+                  await runAction((uid, headers) =>
+                    classroomApi.toggleHomeworkComplete({
+                      noticeId,
+                      uid,
+                      headers,
+                    })
                   );
-                  await fetchAllData();
                 }}
                 onDeleteNotice={async (noticeId) => {
-                  await apiMutate(`/api/notices/${noticeId}`, 'DELETE');
-                  await fetchAllData();
+                  await runAction((_uid, headers) =>
+                    classroomApi.deleteNotice({ noticeId, headers })
+                  );
                 }}
               />
             )}
@@ -271,29 +272,33 @@ function ClassroomCommunityApp() {
               <AnonymousBoardView
                 posts={anonPosts}
                 loading={loadingData}
-                isSignedIn={Boolean(firebaseUser)}
-                onRequireSignIn={signIn}
+                isSignedIn={isAuthenticated}
+                onRequireSignIn={openLoginModal}
                 onOpenCreateAnon={() => openComposer('anonymous')}
                 onToggleLike={async (postId) => {
-                  await apiMutate(`/api/anonymous/${postId}/like`, 'POST');
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.toggleAnonymousLike({ postId, uid, headers })
+                  );
                 }}
                 onAddComment={async (postId, content) => {
-                  await apiMutate(`/api/anonymous/${postId}/comments`, 'POST', {
-                    content,
-                  });
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.addAnonymousComment({
+                      postId,
+                      uid,
+                      content,
+                      headers,
+                    })
+                  );
                 }}
                 onDeletePost={async (postId) => {
-                  await apiMutate(`/api/anonymous/${postId}`, 'DELETE');
-                  await fetchAllData();
+                  await runAction((_uid, headers) =>
+                    classroomApi.deleteAnonymousPost({ postId, headers })
+                  );
                 }}
                 onDeleteComment={async (commentId) => {
-                  await apiMutate(
-                    `/api/anonymous/comments/${commentId}`,
-                    'DELETE'
+                  await runAction((_uid, headers) =>
+                    classroomApi.deleteAnonymousComment({ commentId, headers })
                   );
-                  await fetchAllData();
                 }}
               />
             )}
@@ -302,16 +307,18 @@ function ClassroomCommunityApp() {
               <GalleryView
                 photos={gallery}
                 loading={loadingData}
-                isSignedIn={Boolean(firebaseUser)}
-                onRequireSignIn={signIn}
+                isSignedIn={isAuthenticated}
+                onRequireSignIn={openLoginModal}
                 onOpenUploadGallery={() => openComposer('gallery')}
                 onToggleLike={async (photoId) => {
-                  await apiMutate(`/api/gallery/${photoId}/like`, 'POST');
-                  await fetchAllData();
+                  await runAction((uid, headers) =>
+                    classroomApi.toggleGalleryLike({ photoId, uid, headers })
+                  );
                 }}
                 onDeletePhoto={async (photoId) => {
-                  await apiMutate(`/api/gallery/${photoId}`, 'DELETE');
-                  await fetchAllData();
+                  await runAction((_uid, headers) =>
+                    classroomApi.deleteGalleryPhoto({ photoId, headers })
+                  );
                 }}
               />
             )}
@@ -328,7 +335,7 @@ function ClassroomCommunityApp() {
           <aside className="lg:col-span-4 space-y-5 lg:sticky lg:top-24">
             {/* Student Account Card */}
             <div className="bg-white border border-[#EAE5F5] rounded-2xl p-5">
-              {firebaseUser && profile ? (
+              {isAuthenticated && profile ? (
                 <div className="flex items-center justify-between gap-3">
                   <button
                     type="button"
@@ -365,15 +372,19 @@ function ClassroomCommunityApp() {
                     개별 로그인
                   </div>
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Google 계정으로 로그인하면 게시글 작성, 숙제 체크, 익명 글쓰기, 사진 업로드를 할 수 있어요.
+                    {authProviderMode === 'supabase'
+                      ? '이메일 또는 Google 계정으로 로그인하면 게시글 작성, 숙제 체크, 익명 글쓰기, 사진 업로드를 할 수 있어요.'
+                      : 'Google 계정으로 로그인하면 게시글 작성, 숙제 체크, 익명 글쓰기, 사진 업로드를 할 수 있어요.'}
                   </p>
                   <button
                     type="button"
-                    onClick={signIn}
+                    onClick={openLoginModal}
                     className="w-full inline-flex items-center justify-center gap-1.5 px-4 py-2.5 text-xs font-semibold text-white bg-[#5B5FEF] hover:bg-[#4B4FD8] rounded-xl transition-colors"
                   >
                     <LogIn className="w-3.5 h-3.5" />
-                    Google 계정으로 로그인
+                    {authProviderMode === 'supabase'
+                      ? '로그인 / 회원가입'
+                      : 'Google 계정으로 로그인'}
                   </button>
                 </div>
               )}
@@ -429,15 +440,13 @@ function ClassroomCommunityApp() {
                       key={hw.id}
                       type="button"
                       onClick={async () => {
-                        if (!firebaseUser) {
-                          signIn();
-                          return;
-                        }
-                        await apiMutate(
-                          `/api/notices/${hw.id}/toggle-complete`,
-                          'POST'
+                        await runAction((uid, headers) =>
+                          classroomApi.toggleHomeworkComplete({
+                            noticeId: hw.id,
+                            uid,
+                            headers,
+                          })
                         );
-                        await fetchAllData();
                       }}
                       className="w-full flex items-start gap-2.5 text-left group py-1"
                     >
@@ -546,26 +555,33 @@ function ClassroomCommunityApp() {
         initialMode={createMode}
         onClose={() => setCreateOpen(false)}
         onCreatePost={async (payload) => {
-          await apiMutate('/api/posts', 'POST', payload);
+          await runAction((uid, headers) =>
+            classroomApi.createPost({ uid, headers, payload })
+          );
           setActiveTab('feed');
-          await fetchAllData();
         }}
         onCreateNotice={async (payload) => {
-          await apiMutate('/api/notices', 'POST', payload);
+          await runAction((uid, headers) =>
+            classroomApi.createNotice({ uid, headers, payload })
+          );
           setActiveTab('notices');
-          await fetchAllData();
         }}
         onCreateAnonymous={async (payload) => {
-          await apiMutate('/api/anonymous', 'POST', payload);
+          await runAction((uid, headers) =>
+            classroomApi.createAnonymousPost({ uid, headers, payload })
+          );
           setActiveTab('anonymous');
-          await fetchAllData();
         }}
         onCreateGallery={async (payload) => {
-          await apiMutate('/api/gallery', 'POST', payload);
+          await runAction((uid, headers) =>
+            classroomApi.createGalleryPhoto({ uid, headers, payload })
+          );
           setActiveTab('gallery');
-          await fetchAllData();
         }}
       />
+
+      {/* Supabase Email / Google Login Modal */}
+      <AuthModal />
     </div>
   );
 }

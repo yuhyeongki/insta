@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Check, LogIn, LogOut, Upload } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.tsx';
+import { updateMyProfile } from '../services/classroomApi.ts';
 import type { Classmate } from '../types/community.ts';
 import { compressImageFileToDataUrl } from '../utils/imageUpload.ts';
 import { Avatar } from './Avatar.tsx';
@@ -20,11 +21,12 @@ const TINT_OPTIONS = [
 
 export function ProfileView({ classmates, onProfileSaved }: ProfileViewProps) {
   const {
-    firebaseUser,
+    isAuthenticated,
+    authProviderMode,
     profile,
     loading,
     authError,
-    signIn,
+    openLoginModal,
     signOut,
     refreshProfile,
     getAuthHeaders,
@@ -67,6 +69,7 @@ export function ProfileView({ classmates, onProfileSaved }: ProfileViewProps) {
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!profile) return;
     if (!displayName.trim()) {
       setSaveError('이름을 입력해 주세요.');
       return;
@@ -76,25 +79,16 @@ export function ProfileView({ classmates, onProfileSaved }: ProfileViewProps) {
     setSaveMessage(null);
     try {
       const headers = await getAuthHeaders();
-      const res = await fetch('/api/me', {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          ...headers,
-        },
-        body: JSON.stringify({
-          displayName,
-          studentNumber,
-          bio,
-          role,
-          avatarTint,
-          avatarUrl,
-        }),
+      await updateMyProfile({
+        uid: profile.uid,
+        displayName,
+        studentNumber,
+        bio,
+        role,
+        avatarTint,
+        avatarUrl,
+        headers,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || '프로필 저장에 실패했습니다.');
-      }
       await refreshProfile();
       await onProfileSaved();
       setSaveMessage('프로필이 저장되었습니다.');
@@ -115,13 +109,15 @@ export function ProfileView({ classmates, onProfileSaved }: ProfileViewProps) {
           <div className="py-8 text-center text-sm text-slate-500">
             계정 정보를 확인하고 있습니다...
           </div>
-        ) : !firebaseUser || !profile ? (
+        ) : !isAuthenticated || !profile ? (
           <div className="max-w-md mx-auto text-center space-y-4 py-4">
             <h1 className="text-xl font-bold text-slate-900">
               개별 로그인으로 우리반그램 시작하기
             </h1>
             <p className="text-sm text-slate-600 leading-relaxed">
-              Google 계정으로 간편하게 개별 로그인하면 피드 글쓰기, 숙제 완료 체크, 익명 게시판 글 작성, 학급 갤러리 사진 업로드를 이용할 수 있습니다.
+              {authProviderMode === 'supabase'
+                ? '이메일 또는 Google 계정으로 간편하게 개별 로그인하면 피드 글쓰기, 숙제 완료 체크, 익명 게시판 글 작성, 학급 갤러리 사진 업로드를 이용할 수 있습니다.'
+                : 'Google 계정으로 간편하게 개별 로그인하면 피드 글쓰기, 숙제 완료 체크, 익명 게시판 글 작성, 학급 갤러리 사진 업로드를 이용할 수 있습니다.'}
             </p>
             {authError && (
               <p className="text-xs text-rose-600 bg-rose-50 rounded-xl px-3 py-2">
@@ -130,11 +126,13 @@ export function ProfileView({ classmates, onProfileSaved }: ProfileViewProps) {
             )}
             <button
               type="button"
-              onClick={signIn}
+              onClick={openLoginModal}
               className="inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-semibold text-white bg-[#5B5FEF] hover:bg-[#4B4FD8] rounded-xl transition-colors"
             >
               <LogIn className="w-4 h-4" />
-              Google 계정으로 로그인
+              {authProviderMode === 'supabase'
+                ? '로그인 / 회원가입'
+                : 'Google 계정으로 로그인'}
             </button>
           </div>
         ) : (
